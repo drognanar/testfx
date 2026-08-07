@@ -141,6 +141,25 @@ internal interface IMtpServerClient : IDisposable
     /// Sends the <c>exit</c> notification, asking the application to shut down.
     /// </summary>
     Task ExitAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends the <c>exit</c> notification and optionally waits a bounded amount of time for the launched
+    /// application to shut down gracefully.
+    /// </summary>
+    /// <param name="waitForExit">
+    /// <see langword="true"/> to wait for a process launched by this client; <see langword="false"/> to return
+    /// after sending the notification.
+    /// </param>
+    /// <param name="timeout">
+    /// The maximum graceful-shutdown wait. When <see langword="null"/>, the client default is used.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the notification send or graceful-shutdown wait.</param>
+    /// <remarks>
+    /// Waiting is a no-op when the client was created over an externally supplied connection. If the process
+    /// does not exit within the timeout, this method returns normally; disposing the client retains its
+    /// existing process-tree termination fallback.
+    /// </remarks>
+    Task ExitAsync(bool waitForExit, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

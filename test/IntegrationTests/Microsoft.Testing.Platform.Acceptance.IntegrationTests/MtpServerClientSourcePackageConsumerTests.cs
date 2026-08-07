@@ -81,6 +81,7 @@ public sealed class MtpServerClientSourcePackageConsumerTests : AcceptanceTestBa
                     IsStateful = true,
                     ConnectionTimeout = TimeSpan.FromSeconds(30),
                     Logger = logger,
+                    DebuggerHandler = new DebuggerHandler(),
                 };
                 options.EnvironmentVariables["EXAMPLE"] = "1";
 
@@ -110,11 +111,27 @@ public sealed class MtpServerClientSourcePackageConsumerTests : AcceptanceTestBa
 
                 await client.RunTestsAsync(new[] { "uid" }, cancellationToken);
                 await client.RunTestsWithFilterAsync("/*/*/*/*", cancellationToken);
-                await client.ExitAsync(cancellationToken);
+                await client.ExitAsync(waitForExit: true, timeout: TimeSpan.FromSeconds(30), cancellationToken);
 
                 // Referencing the platform assembly alongside the source package must bind these two public
                 // types to the same assembly. Injected protocol types live in a package-private namespace.
                 _ = new TestNodeUidListFilter(new[] { new TestNodeUid("uid") });
+            }
+
+            private sealed class DebuggerHandler : IMtpDebuggerHandler
+            {
+                public Task<int> LaunchAsync(MtpProcessStartInfo startInfo, CancellationToken cancellationToken)
+                {
+                    Console.WriteLine(startInfo.Program + " " + startInfo.Arguments + " " + startInfo.WorkingDirectory);
+                    Console.WriteLine(startInfo.EnvironmentVariables.Count);
+                    return Task.FromResult(123);
+                }
+
+                public Task AttachAsync(int processId, CancellationToken cancellationToken)
+                {
+                    Console.WriteLine(processId);
+                    return Task.CompletedTask;
+                }
             }
 
             private static void OnTestNodesUpdated(object? sender, MtpTestNodeUpdateEventArgs e)

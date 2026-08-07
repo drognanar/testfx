@@ -63,7 +63,7 @@ public sealed class MtpServerClientAcceptanceTests : AcceptanceTestBase<MtpServe
                 snapshot,
                 $"Expected exactly one discovered action node named '{ExpectedTestDisplayName}'. Collected: {Describe(snapshot)}");
 
-            await client.ExitAsync(cancellationToken);
+            await client.ExitAsync(waitForExit: true, timeout: TimeSpan.FromSeconds(30), cancellationToken);
         }
 
         // Session 2: initialize + run.
@@ -93,7 +93,7 @@ public sealed class MtpServerClientAcceptanceTests : AcceptanceTestBase<MtpServe
                 snapshot,
                 $"Expected exactly one passed action node named '{ExpectedTestDisplayName}'. Collected: {Describe(snapshot)}");
 
-            await client.ExitAsync(cancellationToken);
+            await client.ExitAsync(waitForExit: true, timeout: TimeSpan.FromSeconds(30), cancellationToken);
         }
     }
 

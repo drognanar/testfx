@@ -18,10 +18,6 @@ public sealed class MtpServerClientTests
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
 
-    // A representative server-initiated request method. The platform has no such constant yet; the client
-    // dispatches any server request generically, so a literal is sufficient to exercise the decline/handle path.
-    private const string ClientAttachDebuggerMethod = "client/attachDebugger";
-
     public TestContext TestContext { get; set; } = null!;
 
     [TestMethod]
@@ -395,6 +391,26 @@ public sealed class MtpServerClientTests
     }
 
     [TestMethod]
+    public async Task ExitAsync_WaitForExit_WithExternalConnection_DoesNotWait()
+    {
+        using FakeMtpServer server = new();
+        using MtpServerClient client = await ConnectAndInitializeAsync(server).ConfigureAwait(false);
+        var stopwatch = Stopwatch.StartNew();
+
+        await WithTimeoutAsync(client.ExitAsync(
+            waitForExit: true,
+            timeout: TimeSpan.FromSeconds(20),
+            TestContext.CancellationToken)).ConfigureAwait(false);
+
+        stopwatch.Stop();
+        Assert.IsLessThan(
+            TimeSpan.FromSeconds(2),
+            stopwatch.Elapsed,
+            "A client over an externally supplied connection must not wait for a process it does not own.");
+        await server.WaitForNotificationAsync(JsonRpcMethods.Exit, DefaultTimeout).ConfigureAwait(false);
+    }
+
+    [TestMethod]
     public async Task RunTestsAsync_Cancellation_SendsCancelRequestAndThrows()
     {
         using FakeMtpServer server = new() { WithholdRunResponse = true };
@@ -452,7 +468,7 @@ public sealed class MtpServerClientTests
         using MtpServerClient client = await ConnectAndInitializeAsync(server).ConfigureAwait(false);
 
         // ServerRequestHandler is null by default, so the client declines with a null result.
-        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync(ClientAttachDebuggerMethod)).ConfigureAwait(false);
+        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync(MtpDebuggerMethods.Attach)).ConfigureAwait(false);
 
         Assert.IsNull(response.Result);
     }
@@ -472,9 +488,9 @@ public sealed class MtpServerClientTests
             return Task.FromResult<IDictionary<string, object?>?>(null);
         };
 
-        await WithTimeoutAsync(server.SendServerRequestAsync(ClientAttachDebuggerMethod)).ConfigureAwait(false);
+        await WithTimeoutAsync(server.SendServerRequestAsync(MtpDebuggerMethods.Attach)).ConfigureAwait(false);
 
-        Assert.AreEqual(ClientAttachDebuggerMethod, observedMethod);
+        Assert.AreEqual(MtpDebuggerMethods.Attach, observedMethod);
     }
 
     [TestMethod]
@@ -483,10 +499,10 @@ public sealed class MtpServerClientTests
         using FakeMtpServer server = new();
         using MtpServerClient client = await ConnectAndInitializeAsync(server).ConfigureAwait(false);
 
-        // The protocol's attach-debugger response is a small object (e.g. { success: bool }). Returning a
-        // non-null Dictionary<string, object?> exercises the client-only response-dictionary pass-through
-        // serializer on BOTH formatter paths (Jsonite on net462, System.Text.Json on net8). Without it the
-        // response write throws and the server waits forever, so a regression surfaces here as a timeout.
+        // The raw escape hatch can support extension requests with an object result. Returning a non-null
+        // Dictionary<string, object?> exercises the client-only response-dictionary pass-through serializer
+        // on BOTH formatter paths (Jsonite on net462, System.Text.Json on net8). Without it the response write
+        // throws and the server waits forever, so a regression surfaces here as a timeout.
         client.ServerRequestHandler = (method, parameters, cancellationToken) =>
         {
             _ = method;
@@ -499,7 +515,7 @@ public sealed class MtpServerClientTests
             });
         };
 
-        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync(ClientAttachDebuggerMethod)).ConfigureAwait(false);
+        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync("client/custom")).ConfigureAwait(false);
 
         Assert.IsInstanceOfType(response.Result, typeof(IDictionary<string, object?>));
         var result = (IDictionary<string, object?>)response.Result!;
@@ -530,12 +546,107 @@ public sealed class MtpServerClientTests
             });
         };
 
-        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync(ClientAttachDebuggerMethod)).ConfigureAwait(false);
+        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync("client/custom")).ConfigureAwait(false);
 
         Assert.IsInstanceOfType(response.Result, typeof(IDictionary<string, object?>));
         var result = (IDictionary<string, object?>)response.Result!;
         Assert.IsTrue((bool)result["success"]!, "Expected the boolean payload to survive the round trip.");
         Assert.AreEqual("attached", result["detail"], "Expected the string payload to survive the round trip.");
+    }
+
+    [TestMethod]
+    public async Task InitializeAsync_WithDebuggerHandler_AdvertisesDebuggerProvider()
+    {
+        using FakeMtpServer server = new();
+        var debugger = new RecordingDebuggerHandler();
+        using MtpServerClient client = server.ConnectClient(new MtpServerClientOptions { DebuggerHandler = debugger });
+
+        _ = await WithTimeoutAsync(client.InitializeAsync(TestContext.CancellationToken)).ConfigureAwait(false);
+
+        InitializeRequestArgs args = GetSingleRequestParams<InitializeRequestArgs>(server, JsonRpcMethods.Initialize);
+        Assert.IsTrue(args.Capabilities.DebuggerProvider);
+    }
+
+    [TestMethod]
+    public async Task ServerInitiatedLaunchDebugger_WithTypedHandler_DecodesRequestAndReturnsProcessId()
+    {
+        using FakeMtpServer server = new();
+        var debugger = new RecordingDebuggerHandler { LaunchedProcessId = 8675 };
+        using MtpServerClient client = server.ConnectClient(new MtpServerClientOptions { DebuggerHandler = debugger });
+        _ = await WithTimeoutAsync(client.InitializeAsync(TestContext.CancellationToken)).ConfigureAwait(false);
+
+        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync(
+            MtpDebuggerMethods.Launch,
+            new ProcessInfoArgs(
+                "testhost.exe",
+                "--run tests.dll",
+                @"C:\work",
+                new Dictionary<string, string?> { ["MTP_MODE"] = "debug" }))).ConfigureAwait(false);
+
+        Assert.IsNotNull(debugger.StartInfo);
+        Assert.AreEqual("testhost.exe", debugger.StartInfo.Program);
+        Assert.AreEqual("--run tests.dll", debugger.StartInfo.Arguments);
+        Assert.AreEqual(@"C:\work", debugger.StartInfo.WorkingDirectory);
+        Assert.AreEqual("debug", debugger.StartInfo.EnvironmentVariables["MTP_MODE"]);
+        IDictionary<string, object?> result = GetResponseDictionary(response);
+        Assert.AreEqual(8675, Convert.ToInt32(result[JsonRpcStrings.ProcessId], CultureInfo.InvariantCulture));
+    }
+
+    [TestMethod]
+    public async Task ServerInitiatedAttachDebugger_WithTypedHandler_AttachesAndReturnsNullResult()
+    {
+        using FakeMtpServer server = new();
+        var debugger = new RecordingDebuggerHandler();
+        using MtpServerClient client = server.ConnectClient(new MtpServerClientOptions { DebuggerHandler = debugger });
+        _ = await WithTimeoutAsync(client.InitializeAsync(TestContext.CancellationToken)).ConfigureAwait(false);
+
+        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync(
+            MtpDebuggerMethods.Attach,
+            new AttachDebuggerInfoArgs(4242))).ConfigureAwait(false);
+
+        Assert.AreEqual(4242, debugger.AttachedProcessId);
+
+        // The protocol defines no response body for client/attachDebugger, so the typed handler answers
+        // with a null result (see MtpServerClient.OnServerRequestAsync).
+        Assert.IsNull(response.Result);
+    }
+
+    [TestMethod]
+    public async Task ServerInitiatedUnknownRequest_WithTypedHandler_UsesRawFallback()
+    {
+        const string CustomMethod = "client/custom";
+        using FakeMtpServer server = new();
+        var debugger = new RecordingDebuggerHandler();
+        using MtpServerClient client = server.ConnectClient(new MtpServerClientOptions { DebuggerHandler = debugger });
+        _ = await WithTimeoutAsync(client.InitializeAsync(TestContext.CancellationToken)).ConfigureAwait(false);
+        string? observedMethod = null;
+        client.ServerRequestHandler = (method, _, _) =>
+        {
+            observedMethod = method;
+            return Task.FromResult<IDictionary<string, object?>?>(null);
+        };
+
+        _ = await WithTimeoutAsync(server.SendServerRequestAsync(CustomMethod)).ConfigureAwait(false);
+
+        Assert.AreEqual(CustomMethod, observedMethod);
+        Assert.IsNull(debugger.StartInfo);
+        Assert.IsNull(debugger.AttachedProcessId);
+    }
+
+    [TestMethod]
+    public async Task ServerInitiatedAttachDebugger_WithMalformedParams_DoesNotInvokeTypedHandler()
+    {
+        using FakeMtpServer server = new();
+        var debugger = new RecordingDebuggerHandler();
+        using MtpServerClient client = server.ConnectClient(new MtpServerClientOptions { DebuggerHandler = debugger });
+        _ = await WithTimeoutAsync(client.InitializeAsync(TestContext.CancellationToken)).ConfigureAwait(false);
+
+        ResponseMessage response = await WithTimeoutAsync(server.SendServerRequestAsync(
+            MtpDebuggerMethods.Attach,
+            new Dictionary<string, object?> { [JsonRpcStrings.ProcessId] = "not-an-int" })).ConfigureAwait(false);
+
+        Assert.IsNull(debugger.AttachedProcessId);
+        Assert.IsNull(response.Result);
     }
 
     [TestMethod]
@@ -639,5 +750,34 @@ public sealed class MtpServerClientTests
             typeof(IDictionary<string, object?>),
             $"Expected the '{method}' request params to be {typeof(T).Name} or a raw property bag.");
         return SerializerUtilities.Deserialize<T>((IDictionary<string, object?>)request.Params);
+    }
+
+    private static IDictionary<string, object?> GetResponseDictionary(ResponseMessage response)
+    {
+        Assert.IsInstanceOfType(response.Result, typeof(IDictionary<string, object?>));
+        return (IDictionary<string, object?>)response.Result!;
+    }
+
+    private sealed class RecordingDebuggerHandler : IMtpDebuggerHandler
+    {
+        public int LaunchedProcessId { get; set; } = 123;
+
+        public MtpProcessStartInfo? StartInfo { get; private set; }
+
+        public int? AttachedProcessId { get; private set; }
+
+        public Task<int> LaunchAsync(MtpProcessStartInfo startInfo, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StartInfo = startInfo;
+            return Task.FromResult(LaunchedProcessId);
+        }
+
+        public Task AttachAsync(int processId, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AttachedProcessId = processId;
+            return Task.CompletedTask;
+        }
     }
 }

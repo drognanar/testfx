@@ -146,7 +146,7 @@ internal static class Program
         }
 
         Console.WriteLine("PACKAGEDCONSUMER: DISCOVERED " + ExpectedDisplayName);
-        await client.ExitAsync(cancellationToken);
+        await client.ExitAsync(waitForExit: true, timeout: TimeSpan.FromSeconds(30), cancellationToken);
         return true;
     }
 
@@ -180,7 +180,7 @@ internal static class Program
         }
 
         Console.WriteLine("PACKAGEDCONSUMER: EXECUTED " + ExpectedDisplayName);
-        await client.ExitAsync(cancellationToken);
+        await client.ExitAsync(waitForExit: true, timeout: TimeSpan.FromSeconds(30), cancellationToken);
         return true;
     }
 

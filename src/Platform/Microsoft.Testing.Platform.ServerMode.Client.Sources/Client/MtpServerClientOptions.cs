@@ -30,6 +30,13 @@ internal sealed class MtpServerClientOptions
     public bool DebuggerProvider { get; set; }
 
     /// <summary>
+    /// Gets or sets the typed handler for <c>client/attachDebugger</c> and
+    /// <c>client/launchDebugger</c> server requests. Configuring a handler automatically advertises
+    /// <c>capabilities.testing.debuggerProvider</c> during initialization.
+    /// </summary>
+    public IMtpDebuggerHandler? DebuggerHandler { get; set; }
+
+    /// <summary>
     /// Gets or sets a value indicating whether the client keeps the connection alive for multiple requests
     /// (<c>capabilities.testing.isStateful</c> / <c>experimental_multiRequestSupport</c>). When
     /// <see langword="false"/> the client performs a single discover or run and then exits. Defaults to

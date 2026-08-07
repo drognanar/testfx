@@ -20,6 +20,8 @@ namespace Microsoft.Testing.Platform.ServerMode.Client;
 /// </remarks>
 internal sealed class MtpServerClient : IMtpServerClient
 {
+    private static readonly TimeSpan DefaultGracefulExitTimeout = TimeSpan.FromSeconds(30);
+
     private readonly MtpJsonRpcConnection _connection;
     private readonly MtpServerClientOptions _options;
     private readonly MtpServerProcess? _process;
@@ -121,7 +123,7 @@ internal sealed class MtpServerClient : IMtpServerClient
         var args = new InitializeRequestArgs(
             GetCurrentProcessId(),
             new ClientInfo(_options.ClientName, _options.ClientVersion),
-            new ClientCapabilities(_options.DebuggerProvider, _options.IsStateful));
+            new ClientCapabilities(_options.DebuggerProvider || _options.DebuggerHandler is not null, _options.IsStateful));
 
         ResponseMessage response = await _connection.SendRequestAsync(JsonRpcMethods.Initialize, args, cancellationToken).ConfigureAwait(false);
         MtpServerCapabilities capabilities = DecodeCapabilities(AsResultDictionary(response.Result));
@@ -155,9 +157,26 @@ internal sealed class MtpServerClient : IMtpServerClient
 
     /// <inheritdoc />
     public Task ExitAsync(CancellationToken cancellationToken = default)
+        => ExitAsync(waitForExit: false, timeout: null, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task ExitAsync(bool waitForExit, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
     {
+        TimeSpan effectiveTimeout = timeout ?? DefaultGracefulExitTimeout;
+        if (waitForExit && _process is not null)
+        {
+            ValidateGracefulExitTimeout(effectiveTimeout, nameof(timeout));
+        }
+
         EnsureStarted();
-        return _connection.SendNotificationAsync(JsonRpcMethods.Exit, null, cancellationToken);
+        await _connection.SendNotificationAsync(JsonRpcMethods.Exit, null, cancellationToken).ConfigureAwait(false);
+
+        if (!waitForExit || _process is null)
+        {
+            return;
+        }
+
+        _ = await _process.WaitForExitAsync(effectiveTimeout, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -185,6 +204,16 @@ internal sealed class MtpServerClient : IMtpServerClient
     {
         using var current = Process.GetCurrentProcess();
         return current.Id;
+    }
+
+    private static void ValidateGracefulExitTimeout(TimeSpan timeout, string parameterName)
+    {
+        // CancellationTokenSource.CancelAfter(TimeSpan) is limited to Int32 milliseconds on the oldest
+        // target supported by this source package. Keep validation deterministic across every consumer TFM.
+        if (timeout <= TimeSpan.Zero || timeout.TotalMilliseconds > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(parameterName, timeout, $"The timeout must be greater than zero and no greater than {int.MaxValue} milliseconds.");
+        }
     }
 
     private static ICollection<TestNode> BuildTestNodes(IReadOnlyCollection<string> testNodeUids)
@@ -294,6 +323,31 @@ internal sealed class MtpServerClient : IMtpServerClient
 
     private async Task<object?> OnServerRequestAsync(RequestMessage request, CancellationToken cancellationToken)
     {
+        if (_options.DebuggerHandler is { } debuggerHandler)
+        {
+            if (request.Method == MtpDebuggerMethods.Launch)
+            {
+                MtpProcessStartInfo startInfo = DecodeProcessStartInfo(request.Params);
+                int processId = await debuggerHandler.LaunchAsync(startInfo, cancellationToken).ConfigureAwait(false);
+                return new Dictionary<string, object?>
+                {
+                    [JsonRpcStrings.ProcessId] = processId,
+                };
+            }
+
+            if (request.Method == MtpDebuggerMethods.Attach)
+            {
+                int processId = DecodeRequiredInt32(request.Params, JsonRpcStrings.ProcessId, request.Method);
+                await debuggerHandler.AttachAsync(processId, cancellationToken).ConfigureAwait(false);
+
+                // The server-mode protocol defines no response body for client/attachDebugger (there is no
+                // AttachDebuggerResponse type; the request carries only { processId }). The established
+                // consumer answers it with a null result, so mirror that exactly and answer with null rather
+                // than inventing a { success: true } payload the server never reads.
+                return null;
+            }
+        }
+
         Func<string, IDictionary<string, object?>?, CancellationToken, Task<IDictionary<string, object?>?>>? handler =
             Volatile.Read(ref _serverRequestHandler);
         if (handler is null)
@@ -315,6 +369,88 @@ internal sealed class MtpServerClient : IMtpServerClient
         var normalized = new Dictionary<string, object?>(result);
         return normalized;
     }
+
+    private static MtpProcessStartInfo DecodeProcessStartInfo(object? rawParams)
+    {
+        IDictionary<string, object?> parameters = GetRequiredParameters(rawParams, MtpDebuggerMethods.Launch);
+        string program = parameters.TryGetValue(JsonRpcStrings.Program, out object? programValue) && programValue is string programString
+            ? programString
+            : throw new MtpServerClientException(
+                $"The '{MtpDebuggerMethods.Launch}' request requires a string '{JsonRpcStrings.Program}' parameter.");
+
+        string? arguments = GetOptionalString(parameters, JsonRpcStrings.Args, MtpDebuggerMethods.Launch);
+        string? workingDirectory = GetOptionalString(parameters, JsonRpcStrings.WorkingDirectory, MtpDebuggerMethods.Launch);
+        IReadOnlyDictionary<string, string?> environmentVariables = DecodeEnvironmentVariables(
+            parameters.TryGetValue(JsonRpcStrings.EnvironmentVariables, out object? environment) ? environment : null);
+
+        return new MtpProcessStartInfo(program, arguments, workingDirectory, environmentVariables);
+    }
+
+    private static IReadOnlyDictionary<string, string?> DecodeEnvironmentVariables(object? value)
+    {
+        var environment = new Dictionary<string, string?>(StringComparer.Ordinal);
+        if (value is null)
+        {
+            return environment;
+        }
+
+        if (value is IDictionary<string, object?> dictionary)
+        {
+            AddEnvironmentVariables(environment, dictionary);
+            return environment;
+        }
+
+        if (value is ICollection<object> items)
+        {
+            foreach (IDictionary<string, object?> item in items.OfType<IDictionary<string, object?>>())
+            {
+                AddEnvironmentVariables(environment, item);
+            }
+
+            return environment;
+        }
+
+        throw new MtpServerClientException(
+            $"The '{MtpDebuggerMethods.Launch}' request parameter '{JsonRpcStrings.EnvironmentVariables}' must be an object.");
+    }
+
+    private static void AddEnvironmentVariables(
+        IDictionary<string, string?> destination,
+        IDictionary<string, object?> source)
+    {
+        foreach (KeyValuePair<string, object?> variable in source)
+        {
+            if (variable.Value is not null and not string)
+            {
+                throw new MtpServerClientException(
+                    $"The '{MtpDebuggerMethods.Launch}' environment variable '{variable.Key}' must be a string or null.");
+            }
+
+            destination[variable.Key] = variable.Value as string;
+        }
+    }
+
+    private static int DecodeRequiredInt32(object? rawParams, string parameterName, string method)
+    {
+        IDictionary<string, object?> parameters = GetRequiredParameters(rawParams, method);
+        int? value = parameters.TryGetValue(parameterName, out object? rawValue) ? AsInt(rawValue) : null;
+        return value ?? throw new MtpServerClientException(
+            $"The '{method}' request requires an Int32 '{parameterName}' parameter.");
+    }
+
+    private static IDictionary<string, object?> GetRequiredParameters(object? rawParams, string method)
+        => rawParams as IDictionary<string, object?>
+            ?? throw new MtpServerClientException($"The '{method}' request requires an object params payload.");
+
+    private static string? GetOptionalString(
+        IDictionary<string, object?> parameters,
+        string parameterName,
+        string method)
+        => !parameters.TryGetValue(parameterName, out object? value) || value is null
+            ? null
+            : value as string
+                ?? throw new MtpServerClientException(
+                    $"The '{method}' request parameter '{parameterName}' must be a string or null.");
 
     private void EnsureStarted()
         => _connection.Start();

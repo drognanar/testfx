@@ -221,6 +221,10 @@ internal sealed class FakeMtpServer : IDisposable
     /// assert on the method name and the returned result.
     /// </summary>
     public Task<ResponseMessage> SendServerRequestAsync(string method)
+        => SendServerRequestAsync(method, null);
+
+    /// <summary>Sends a server-initiated request with the supplied params object.</summary>
+    public Task<ResponseMessage> SendServerRequestAsync(string method, object? @params)
     {
         int id = Interlocked.Increment(ref _nextServerRequestId);
         var tcs = new TaskCompletionSource<ResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -229,7 +233,7 @@ internal sealed class FakeMtpServer : IDisposable
             _pendingServerRequests[id] = tcs;
         }
 
-        _ = WriteAsync(new RequestMessage(id, method, null));
+        _ = WriteAsync(new RequestMessage(id, method, @params));
         return tcs.Task;
     }
 

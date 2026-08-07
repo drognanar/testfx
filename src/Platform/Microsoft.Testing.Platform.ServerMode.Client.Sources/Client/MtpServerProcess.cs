@@ -275,6 +275,31 @@ internal sealed class MtpServerProcess : IDisposable
     public string GetStandardError()
         => GetStandardError(_standardError);
 
+    /// <summary>
+    /// Waits up to <paramref name="timeout"/> for the launched application to exit without terminating it.
+    /// </summary>
+    /// <returns><see langword="true"/> when the process exited; <see langword="false"/> on timeout.</returns>
+    public Task<bool> WaitForExitAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        => WaitForExitAsync(_process, timeout, cancellationToken);
+
+    internal static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        using var timeoutCancellation = new CancellationTokenSource();
+        timeoutCancellation.CancelAfter(timeout);
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCancellation.Token);
+        try
+        {
+            await process.WaitForExitAsync(linkedCancellation.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return process.HasExited;
+        }
+    }
+
     private static string GetStandardError(StringBuilder buffer)
     {
         lock (buffer)

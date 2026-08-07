@@ -80,6 +80,7 @@
   <ItemGroup>
     <!-- Ensure is a helper (not a BCL polyfill) used by TestNodeUid on every TFM. -->
     <Compile Include="$(RepoRoot)src/Polyfills/Ensure.cs" Link="Polyfills\Ensure.cs" />
+    <Compile Include="$(RepoRoot)src/Polyfills/ProcessExtensions.cs" Link="Polyfills\ProcessExtensions.cs" />
     <!-- In-repo linked sources use [Embedded]. The pack transform strips that source-only marker and
          excludes this declaration so it cannot collide with a consumer's conventional polyfill. -->
     <Compile Include="$(RepoRoot)src/Polyfills/EmbeddedAttribute.cs" Link="Polyfills\EmbeddedAttribute.cs" />
