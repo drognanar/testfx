@@ -571,29 +571,28 @@ Applies to changes in `src/Platform/` involving serialization/deserialization.
 1. Dependency versions must be managed through Arcade/Maestro. Manual edits to `eng/Versions.props` require justification.
 2. Verify compatibility with all build entry points: Arcade CLI, VS, `dotnet build`.
 3. CI/CD pipeline changes require validation before merge.
-4. Every dependency-impacting change requires a **Dependency Upgrade Assessment**, even when the change is acceptable and produces no actionable finding. Read the [dependency-impact review contract](../workflows/README.md#dependency-impact-review-contract) and [dependency catalogue](../../docs/dependencies.md). Assess new/removed references, versions/ranges, TFM/RID or asset selection, packing/bundled payload, SDK profile/default/feature/import changes, and code/API changes that create a dependency requirement, not only version edits.
+4. Every dependency version change requires a **Dependency Upgrade Assessment**, even when the change is acceptable and produces no actionable finding.
 5. Classify the update as patch, minor, major, pre-release progression, or pre-release-to-stable. Do not assume a green build proves downstream compatibility.
 6. Identify every consuming project and classify the dependency as runtime, build-time, analyzer, test-only, or development-only. Determine whether each consumer is shipping, nonshipping, or pre-release, whether the dependency is exposed through public API signatures, and whether it is automatically injected into consumer projects.
 7. Compare the old and new package metadata for every supported TFM. Report removed TFMs, fallback to less-specific assets, runtime/native asset changes, and minimum framework changes.
 8. Compare dependency groups from the exact old and new package versions using authoritative package-registry metadata. Report added and removed dependencies, major-version shifts, tightened version ranges, and target-specific differences. Follow newly added dependencies far enough to explain the effective transitive impact. Clearly distinguish direct metadata evidence from unresolved transitive impact.
+   For extension updates (for example, `Microsoft.Testing.Extensions.CodeCoverage`), also compare existing transitive dependencies and their minimum versions, not only newly added packages. Trace raised floors back to MSTest meta-package or SDK consumers and include their downstream restore/compatibility impact and upstream justification in the assessment, even for an extension patch update. If the graph or justification cannot be verified, state what remains unknown.
 9. Read upstream release notes, changelogs, migration guides, and official breaking-change documentation for the entire old-exclusive/new-inclusive range. Report source, binary, behavioral, and configuration breaks; obsolete or removed APIs; changed defaults; and known compatibility constraints.
 10. Judge acceptability in the context of the product release train. A major dependency bump is not automatically unacceptable, but raising a public or transitive dependency major in a stable MSTest/MTP minor release requires explicit compatibility evidence. Pre-release or nonshipping packages may accept more churn, but the assessment must state that rationale.
 11. Use authoritative sources only: NuGet package metadata, the dependency's source repository and release notes, and official Microsoft documentation. Link every compatibility claim. If evidence is unavailable, mark it unknown instead of guessing.
-12. Explain the source/API or owner-confirmed functionality requiring each changed dependency separately from the reason its minimum version must change. Name the required API, bug/security fix or supported-servicing constraint. A declared dependency, newer release, green build or compatibility badge alone proves neither functional necessity nor the minimum required version. Trace consumer floors through meta-packages and SDK-injected extensions, update affected catalogue rows, and preserve precise upstream unknowns.
 
 **CHECK — Flag if:**
 - [ ] `eng/Versions.props` manually edited without justification
 - [ ] CI YAML change not validated
 - [ ] New package reference without justification
 - [ ] Bootstrap build compatibility not verified
-- [ ] Dependency graph, payload or activation changed without a complete Dependency Upgrade Assessment, even with unchanged version literals
-- [ ] Dependency functionality or raised minimum lacks a source/API or upstream justification
+- [ ] Dependency version changed without a complete Dependency Upgrade Assessment
 - [ ] New or upgraded package drops a supported TFM or selects a less-specific fallback asset
 - [ ] Dependency graph adds an unexplained package, major-version shift, or restrictive version range
 - [ ] Upstream breaking change affects code, public API, behavior, or configuration in this repository
 - [ ] Stable minor release raises an exposed or transitive dependency major without explicit compatibility evidence
 
-#### Required output for dependency-impacting changes
+#### Required output for dependency version changes
 
 The **Build, dependencies & scripts** scope agent MUST emit this report before
 its normal `CLEAN` or `ISSUE` block:
@@ -607,11 +606,8 @@ its normal `CLEAN` or `ISSUE` block:
 
 ### Evidence
 - **Consumers:** <projects and how the package reaches users>
-- **Functionality and necessity:** <feature and concrete source/API or upstream owner evidence; separately, why the new minimum is needed or the precise unknown>
 - **Dependency metadata:** <added/removed/shifted dependencies, including TFM-specific groups>
-- **Consumer floors:** <old/new effective dependency chain and minimum/range, TFM/RID and SDK profile/feature, including bundled assets; distinguish declared constraints from resolved consumer versions>
 - **Compatibility:** <source, binary, behavioral, configuration, and target-framework evidence>
-- **Alternatives:** <smallest supported option and functionality tradeoff, or evidence needed to determine one; no unsupported lower pins>
 - **Release policy:** <why the update fits or conflicts with the current MSTest/MTP release train>
 - **Sources:** <authoritative links>
 ```
@@ -729,7 +725,7 @@ same context across 22 independent agents.
 | **Localization** | 9 | User-facing strings, resources, localization comments, or CLI descriptions changed. |
 | **Tests** | 10, 11, 12, 13, 14 | Test code changed, or production behavior changed without directly relevant validation. Own actual red/green or labeled mutation/equivalence evidence as well as PR-level intent and coverage; the dedicated test-quality workflow owns per-test grades and deep parallel-safety reconciliation. |
 | **Analyzers** | 18 | Analyzer, code-fix, diagnostic, or analyzer-test code changed. |
-| **Build, dependencies & scripts** | 20, 22 | MSBuild, packaging, dependency, PowerShell, CI, or agentic workflow files changed, or code/API changes alter dependency requirements, bundled assets or SDK feature activation. |
+| **Build, dependencies & scripts** | 20, 22 | MSBuild, packaging, dependency, PowerShell, CI, or agentic workflow files changed. |
 
 Create an internal scope plan before delegation. For every scope, record:
 
@@ -814,13 +810,10 @@ Before analyzing the diff, load the repository history knowledge base produced b
    Put unresolved evidence gaps in the combined summary, not invented defects
    or apply-ready inline fixes; do not block solely for missing media or a record.
 
-   When a dependency-impacting change occurs (including graph, payload or SDK
-   activation changes without a version edit), the **Build, dependencies &
-   scripts** agent also receives the old/new references or activation, exact
-   versions where applicable, affected projects/imports/packaging files, and
-   release-note links from the PR description. Require it to read the linked
-   dependency-impact review contract and catalogue and use the Dependency
-   Upgrade Assessment output contract above.
+   When a dependency version changes, the **Build, dependencies & scripts**
+   agent also receives the exact old and new versions, affected project files,
+   and any release-note links from the PR description. It must use the required
+   Dependency Upgrade Assessment output contract above.
 
    Include verbatim in every scope-agent prompt:
 
@@ -930,7 +923,7 @@ Invoke as a background `task` (`agent_type: "general-purpose"`, `model: "claude-
    proposed correction works on the oldest affected target. A validation
    agent's `CONFIRMED` label is not a substitute for this evidence.
 
-   Independently validate every factual claim in a Dependency Upgrade Assessment against the cited authoritative source. Ensure the package versions are exact, dependency groups match the relevant TFMs, and release notes cover the complete version interval. Check the introducing feature, source/API use, reason for any raised minimum, effective consumer floors and SDK/bundled activation against the dependency-impact review contract. Preserve unknowns when the available metadata cannot prove the full transitive graph or functional/minimum-version necessity.
+   Independently validate every factual claim in a Dependency Upgrade Assessment against the cited authoritative source. Ensure the package versions are exact, dependency groups match the relevant TFMs, and release notes cover the complete version interval. Preserve unknowns when the available metadata cannot prove the full transitive graph.
 
 ### Wave 3: Post
 
@@ -966,7 +959,7 @@ Invoke as a background `task` (`agent_type: "general-purpose"`, `model: "claude-
 
    **Every inline comment must be actionable.** Do NOT post comments that only praise existing code or say "looks good". If a dimension is clean, do not leave an inline comment for it.
 
-5. When the PR changes dependency requirements, graph, payload or activation, retain the complete validated
+5. When the PR changes dependency versions, retain the complete validated
    **Dependency Upgrade Assessment** regardless of its verdict. Publish it
    inside the **Build, dependencies & scripts** scope block, emphasizing the
    evidence that determines the verdict rather than repeating generic metadata.
@@ -985,17 +978,6 @@ Invoke as a background `task` (`agent_type: "general-purpose"`, `model: "claude-
    Use an action-first, evidence-backed review:
 
    - Lead with a one-sentence outcome. Do not restate the PR description.
-   - For dependency-impacting changes, apply the linked dependency-impact
-     review contract's attention rule: immediately after the outcome, add
-     `**Dependency attention required:**` for an unresolved condition,
-     consequential floor/asset/support change lacking sufficient justification
-     or compatibility evidence, or a material evidence gap.
-     Name the chain, old/new floor, affected TFM/profile, justification or
-     unknown, verdict and action; add a measurable Reviewer action. Keep the
-     full assessment in its scope block. For a fully justified acceptable
-     consequential change, use a neutral `**Dependency impact:**` line instead,
-     with no invented action. Do not invent warnings for clean updates or add
-     standalone comments or named mentions.
    - Add `### Reviewer actions` only when the author or maintainer must do
      something. Each checkbox must state **Required before merge** or
      **Recommended**, followed by a measurable **Done when:** condition.
@@ -1102,7 +1084,6 @@ If the PR only changes `.md`, `.txt`, `.resx`, `.xlf`, or other non-code files, 
 - Do not stop at the manifest diff or Dependabot compatibility badge.
 - Trace the dependency to every shipping and nonshipping consumer in this repository.
 - Post the Dependency Upgrade Assessment even when all 22 dimensions are otherwise clean.
-- Apply the same assessment, validation and visible-attention contract to graph, bundled-payload and SDK activation changes without a version edit. Explain functionality separately from minimum-version necessity, using the dependency catalogue as a map rather than proof of current upstream constraints.
 - Coordinate related package upgrades when one package constrains or exposes another package's version.
 
 ### PRs that only change tests
